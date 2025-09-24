@@ -7,27 +7,25 @@ from pywebio.input import *
 from pywebio.output import *
 from pywebio.session import run_async, run_js
 
-# Глобальные переменные
-current_user = None
-
+# --- НОВОЕ: храним зарегистрированных пользователей ---
 def get_db():
     return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
 
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    # Таблица пользователей (без хеширования — ТОЛЬКО ДЛЯ ДЕМО!)
+    # Таблица пользователей
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL  -- НЕБЕЗОПАСНО! Только для теста.
+            password TEXT NOT NULL
         )
     """)
+    # Таблица сообщений — как в оригинале!
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
-            user_id INTEGER,
             username TEXT NOT NULL,
             text TEXT NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW()
@@ -45,26 +43,20 @@ def cleanup_old_messages():
     cur.close()
     conn.close()
 
-def user_exists(username):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
-    exists = cur.fetchone() is not None
-    cur.close()
-    conn.close()
-    return exists
-
 def register_user(username, password):
-    if user_exists(username):
-        return False, "Имя занято!"
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id", (username, password))
-    user_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return True, user_id
+    try:
+        cur.execute("INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id", (username, password))
+        user_id = cur.fetchone()[0]
+        conn.commit()
+        return True, user_id
+    except psycopg2.IntegrityError:  # имя занято
+        conn.rollback()
+        return False, "Имя уже занято!"
+    finally:
+        cur.close()
+        conn.close()
 
 def login_user(username, password):
     conn = get_db()
@@ -91,39 +83,39 @@ def load_messages():
     conn.close()
     return [(r["username"], r["text"]) for r in rows]
 
-def save_message(user_id, username, text):
+def save_message(username, text):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("INSERT INTO messages (user_id, username, text) VALUES (%s, %s, %s)", (user_id, username, text))
+    cur.execute("INSERT INTO messages (username, text) VALUES (%s, %s)", (username, text))
     conn.commit()
     cur.close()
     conn.close()
 
-# Инициализация
+# --- Инициализация ---
 init_db()
 cleanup_old_messages()
 
-async def auth_screen():
+async def auth_flow():
     while True:
-        choice = await actions("Добро пожаловать!", buttons=["Войти", "Регистрация"])
-        if choice == "Регистрация":
+        action = await actions("Чат", buttons=["Войти", "Регистрация"])
+        if action == "Регистрация":
             data = await input_group("Регистрация", [
                 input("Имя", name="username", required=True),
-                input("Пароль", name="password", required=True, type=PASSWORD)
+                input("Пароль", name="password", type=PASSWORD, required=True)
             ])
             ok, result = register_user(data["username"], data["password"])
             if ok:
-                put_success("Регистрация успешна! Теперь войдите.")
+                put_success("Регистрация успешна! Войдите.")
                 await asyncio.sleep(1)
                 clear()
             else:
                 put_error(result)
                 await asyncio.sleep(2)
                 clear()
-        else:  # Вход
+        else:
             data = await input_group("Вход", [
                 input("Имя", name="username", required=True),
-                input("Пароль", name="password", required=True, type=PASSWORD)
+                input("Пароль", name="password", type=PASSWORD, required=True)
             ])
             ok, user_id = login_user(data["username"], data["password"])
             if ok:
@@ -134,33 +126,37 @@ async def auth_screen():
                 await asyncio.sleep(2)
                 clear()
 
-async def main():
-    global current_user
-    put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
+# --- Основной чат (как в оригинале!) ---
+online_users = set()
 
-    # Аутентификация
-    user_id, username = await auth_screen()
+async def main():
+    global online_users
+    user_id, username = await auth_flow()
 
     # Отображаем ID и имя в углу
     put_text(f"[ID: {user_id}] {username}").style(
         "position: fixed; top: 10px; left: 10px; font-weight: bold; color: #2c3e50; z-index: 1000;"
     )
 
+    put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    # Загружаем историю
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
-    # Системное сообщение
-    save_message(user_id, '📢', f'`{username}` присоединился к чату!')
+    if username in online_users:
+        # Маловероятно, но на случай переподключения
+        put_warning("Вы уже в чате!")
+    online_users.add(username)
+
+    save_message('📢', f'`{username}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{username}` присоединился к чату'))
 
-    refresh_task = run_async(refresh_msgs(user_id, username, msg_box))
+    refresh_task = run_async(refresh_msgs(username, msg_box))
 
     while True:
         data = await input_group("Сообщение", [
@@ -170,14 +166,15 @@ async def main():
         if data is None:
             break
         msg_box.append(put_markdown(f"`{username}`: {data['msg']}"))
-        save_message(user_id, username, data['msg'])
+        save_message(username, data['msg'])
 
     refresh_task.close()
-    save_message(user_id, '📢', f'`{username}` покинул чат!')
+    online_users.discard(username)
+    save_message('📢', f'`{username}` покинул чат!')
     toast("Вы вышли из чата!")
     put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
 
-async def refresh_msgs(my_user_id, my_username, msg_box):
+async def refresh_msgs(my_name, msg_box):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT MAX(created_at) FROM messages")
@@ -197,13 +194,12 @@ async def refresh_msgs(my_user_id, my_username, msg_box):
         new = cur.fetchall()
         cur.close()
         conn.close()
-
         for msg in new:
-            if msg["username"] != my_username:
+            if msg["username"] != my_name:
                 txt = f'📢 {msg["text"]}' if msg["username"] == '📢' else f"`{msg['username']}`: {msg['text']}"
                 msg_box.append(put_markdown(txt))
             last_time = msg["created_at"]
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+    start_server(main, host='0.0.0.0', port=port, debug=True, cdn=False)  # debug=True для деталей ошибки!
