@@ -6,9 +6,8 @@ from psycopg2.extras import RealDictCursor
 from pywebio import start_server
 from pywebio.input import *
 from pywebio.output import *
-from pywebio.session import run_async, run_js, info
+from pywebio.session import run_async, run_js
 
-# Глобальное хранилище онлайн-пользователей (по имени из БД)
 online_users = set()
 
 def get_db():
@@ -38,35 +37,45 @@ def init_db():
     cur.close()
     conn.close()
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
 
 def register_user(username, password):
-    conn = get_db()
-    cur = conn.cursor()
     try:
+        conn = get_db()
+        cur = conn.cursor()
         cur.execute("INSERT INTO users (username, password_hash) VALUES (%s, %s)",
                     (username, hash_password(password)))
         conn.commit()
         return True
     except psycopg2.IntegrityError:
         conn.rollback()
-        return False  # имя занято
+        return False
     finally:
         cur.close()
         conn.close()
 
-def authenticate_user(username, password):
+def user_exists(username):
     conn = get_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT username, password_hash FROM users WHERE username = %s", (username,))
-    user = cur.fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+    exists = cur.fetchone() is not None
     cur.close()
     conn.close()
-    if user and user["password_hash"] == hash_password(password):
-        return True
+    return exists
+
+def check_password(username, password):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row:
+        return row["password_hash"] == hash_password(password)
     return False
 
+# --- Функции чата (без изменений, кроме адаптации под auth) ---
 def load_messages():
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -116,45 +125,43 @@ async def refresh_msgs(my_name, msg_box):
                 msg_box.append(put_markdown(txt))
             last_time = msg["created_at"]
 
-async def auth_flow():
+# --- АВТОРИЗАЦИЯ ---
+async def auth():
     while True:
-        action = await actions("Добро пожаловать!", buttons=['Войти', 'Зарегистрироваться'])
-        if action == 'Зарегистрироваться':
+        act = await actions("Выберите действие", buttons=["Войти", "Зарегистрироваться"])
+        if act == "Зарегистрироваться":
             data = await input_group("Регистрация", [
-                input('Имя пользователя', name='username', required=True),
-                input('Пароль', name='password', type=PASSWORD, required=True),
-                input('Повторите пароль', name='password2', type=PASSWORD, required=True)
-            ], validate=lambda d: ('password2', 'Пароли не совпадают!') if d['password'] != d['password2'] else None)
+                input("Имя пользователя", name="user", required=True),
+                input("Пароль", name="pwd", type=PASSWORD, required=True),
+                input("Повторите пароль", name="pwd2", type=PASSWORD, required=True)
+            ], validate=lambda d: ("pwd2", "Пароли не совпадают!") if d["pwd"] != d["pwd2"] else None)
 
-            if register_user(data['username'], data['password']):
-                toast("Регистрация успешна! Теперь войдите.")
+            if register_user(data["user"], data["pwd"]):
+                toast("✅ Регистрация успешна! Теперь войдите.")
             else:
-                toast("Имя занято! Выберите другое.")
+                toast("❌ Имя занято!")
 
-        elif action == 'Войти':
+        elif act == "Войти":
             data = await input_group("Вход", [
-                input('Имя пользователя', name='username', required=True),
-                input('Пароль', name='password', type=PASSWORD, required=True)
+                input("Имя пользователя", name="user", required=True),
+                input("Пароль", name="pwd", type=PASSWORD, required=True)
             ])
-            if authenticate_user(data['username'], data['password']):
-                return data['username']
+            if user_exists(data["user"]) and check_password(data["user"], data["pwd"]):
+                return data["user"]
             else:
-                toast("Неверное имя или пароль!")
+                toast("❌ Неверное имя или пароль!")
 
+# --- ОСНОВНАЯ ФУНКЦИЯ ---
 async def main():
     global online_users
-
-    # Инициализация БД (выполняется один раз)
     init_db()
+    put_markdown("## 💬 Чат с регистрацией (сообщения — 24 ч)")
 
-    put_markdown("## 💬 Защищённый чат (сообщения хранятся 24 часа)")
-
-    # Аутентификация
-    nickname = await auth_flow()
+    nickname = await auth()
 
     if nickname in online_users:
-        toast("Вы уже в чате в другой вкладке!")
-        await sleep(3)
+        put_error("Вы уже в чате в другой вкладке!")
+        await asyncio.sleep(3)
         run_js('location.reload()')
         return
 
@@ -163,7 +170,6 @@ async def main():
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    # Загрузка истории
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
