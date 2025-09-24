@@ -7,22 +7,15 @@ from pywebio.input import *
 from pywebio.output import *
 from pywebio.session import run_async, run_js
 
-# --- НОВОЕ: храним зарегистрированных пользователей ---
+online_users = set()
+
 def get_db():
     return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
 
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    # Таблица пользователей
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """)
-    # Таблица сообщений — как в оригинале!
+    # Таблица сообщений (как в оригинале)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
@@ -31,11 +24,20 @@ def init_db():
             created_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    # Таблица пользователей — с username, password и id
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
 
 def cleanup_old_messages():
+    """Удаляет сообщения старше 24 часов."""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM messages WHERE created_at < NOW() - INTERVAL '24 hours'")
@@ -43,7 +45,18 @@ def cleanup_old_messages():
     cur.close()
     conn.close()
 
+def user_exists(username):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+    exists = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    return exists
+
 def register_user(username, password):
+    if user_exists(username):
+        return False, "Имя уже занято!"
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -51,9 +64,9 @@ def register_user(username, password):
         user_id = cur.fetchone()[0]
         conn.commit()
         return True, user_id
-    except psycopg2.IntegrityError:  # имя занято
+    except Exception as e:
         conn.rollback()
-        return False, "Имя уже занято!"
+        return False, f"Ошибка регистрации: {e}"
     finally:
         cur.close()
         conn.close()
@@ -91,13 +104,13 @@ def save_message(username, text):
     cur.close()
     conn.close()
 
-# --- Инициализация ---
+# Инициализация
 init_db()
 cleanup_old_messages()
 
 async def auth_flow():
     while True:
-        action = await actions("Чат", buttons=["Войти", "Регистрация"])
+        action = await actions("💬 Чат — Вход или регистрация", buttons=["Войти", "Регистрация"])
         if action == "Регистрация":
             data = await input_group("Регистрация", [
                 input("Имя", name="username", required=True),
@@ -105,14 +118,14 @@ async def auth_flow():
             ])
             ok, result = register_user(data["username"], data["password"])
             if ok:
-                put_success("Регистрация успешна! Войдите.")
-                await asyncio.sleep(1)
+                put_success("✅ Регистрация успешна! Теперь войдите.")
+                await asyncio.sleep(1.5)
                 clear()
             else:
-                put_error(result)
+                put_error(f"❌ {result}")
                 await asyncio.sleep(2)
                 clear()
-        else:
+        else:  # Вход
             data = await input_group("Вход", [
                 input("Имя", name="username", required=True),
                 input("Пароль", name="password", type=PASSWORD, required=True)
@@ -122,18 +135,17 @@ async def auth_flow():
                 clear()
                 return user_id, data["username"]
             else:
-                put_error("Неверное имя или пароль!")
+                put_error("❌ Неверное имя или пароль!")
                 await asyncio.sleep(2)
                 clear()
 
-# --- Основной чат (как в оригинале!) ---
-online_users = set()
-
 async def main():
     global online_users
+
+    # Аутентификация
     user_id, username = await auth_flow()
 
-    # Отображаем ID и имя в углу
+    # Отображаем ID и имя в верхнем левом углу
     put_text(f"[ID: {user_id}] {username}").style(
         "position: fixed; top: 10px; left: 10px; font-weight: bold; color: #2c3e50; z-index: 1000;"
     )
@@ -142,17 +154,19 @@ async def main():
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
+    # Загружаем историю
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
+    # Проверка на дубликат имени (в рамках онлайн-пользователей)
     if username in online_users:
-        # Маловероятно, но на случай переподключения
-        put_warning("Вы уже в чате!")
+        put_warning("Вы уже в чате под этим именем!")
     online_users.add(username)
 
+    # Системное сообщение
     save_message('📢', f'`{username}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{username}` присоединился к чату'))
 
@@ -168,6 +182,7 @@ async def main():
         msg_box.append(put_markdown(f"`{username}`: {data['msg']}"))
         save_message(username, data['msg'])
 
+    # Выход
     refresh_task.close()
     online_users.discard(username)
     save_message('📢', f'`{username}` покинул чат!')
@@ -202,4 +217,4 @@ async def refresh_msgs(my_name, msg_box):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    start_server(main, host='0.0.0.0', port=port, debug=True, cdn=False)  # debug=True для деталей ошибки!
+    start_server(main, host='0.0.0.0', port=port, debug=True, cdn=False)
