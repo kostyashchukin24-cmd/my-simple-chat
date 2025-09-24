@@ -28,6 +28,7 @@ def init_db():
             id SERIAL PRIMARY KEY,
             from_user TEXT NOT NULL,
             to_user TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
             created_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE (from_user, to_user)
         )
@@ -59,8 +60,8 @@ def save_message(user, text):
     conn.close()
 
 # --- ДРУЗЬЯ ---
-def add_friend(user, friend):
-    if user == friend or friend == '📢':
+def send_friend_request(from_user, to_user):
+    if from_user == to_user or to_user == '📢':
         return False
     conn = get_db()
     cur = conn.cursor()
@@ -68,50 +69,39 @@ def add_friend(user, friend):
         cur.execute("""
             INSERT INTO friend_requests (from_user, to_user)
             VALUES (%s, %s)
-            ON CONFLICT DO NOTHING
-        """, (user, friend))
+            ON CONFLICT (from_user, to_user) DO NOTHING
+        """, (from_user, to_user))
         conn.commit()
         return True
     except Exception:
+        conn.rollback()
         return False
     finally:
         cur.close()
         conn.close()
 
-def get_friends(user):
+def get_pending_requests(to_user):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT to_user FROM friend_requests WHERE from_user = %s
-        UNION
-        SELECT from_user FROM friend_requests WHERE to_user = %s
-    """, (user, user))
+    cur.execute("SELECT from_user FROM friend_requests WHERE to_user = %s AND status = 'pending'", (to_user,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return sorted({r["to_user"] for r in rows})
+    return [r["from_user"] for r in rows]
 
-async def show_friends_popup(nickname):
-    friends = get_friends(nickname)
-    content = [put_markdown("## 👥 Мои друзья")]
-    if friends:
-        content.append(put_table([[f] for f in friends], header=["Имя"]))
-    else:
-        content.append(put_text("Список пуст."))
+def accept_friend_request(from_user, to_user):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE friend_requests
+        SET status = 'accepted'
+        WHERE from_user = %s AND to_user = %s AND status = 'pending'
+    """, (from_user, to_user))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    content.append(put_text(""))
-    content.append(put_text("Добавить в друзья:"))
-    try:
-        target = await input("Имя пользователя", placeholder="Введите имя", required=False)
-        if target and target != nickname and target != '📢':
-            if add_friend(nickname, target):
-                toast(f"✅ {target} добавлен в друзья!")
-            else:
-                toast("❌ Не удалось добавить.")
-    except Exception:
-        pass  # пользователь закрыл окно
-
-# Инициализация БД
+# Инициализация БД — ОБЯЗАТЕЛЬНО ПОСЛЕ ОБЪЯВЛЕНИЯ ФУНКЦИЙ
 init_db()
 
 async def refresh_msgs(my_name, msg_box):
@@ -158,23 +148,36 @@ async def main():
     save_message('📢', f'`{nickname}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
 
+    # 🔔 ПОКАЗ ВХОДЯЩИХ ЗАПРОСОВ ПРИ ВХОДЕ
+    pending = get_pending_requests(nickname)
+    for user in pending:
+        msg_box.append(put_markdown(f'📬 Запрос в друзья от `{user}`'))
+        put_buttons([
+            {'label': '✅ Принять', 'color': 'success'},
+            {'label': '❌ Отклонить', 'color': 'danger'}
+        ], onclick=[
+            lambda u=user: accept_friend_request(u, nickname),
+            lambda: toast("Запрос отклонён")
+        ])
+
     refresh_task = run_async(refresh_msgs(nickname, msg_box))
 
     while True:
         data = await input_group("Сообщение", [
-            input(name="msg", placeholder="Текст..."),
-            actions(name="cmd", buttons=[
-                "Отправить",
-                {"label": "👥 Друзья", "value": "friends", "type": "submit"},
-                {"label": "Выйти", "type": "cancel"}
-            ])
+            input(name="msg", placeholder="Текст... (/add имя — добавить в друзья)"),
+            actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
         ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
 
         if data is None:
             break
 
-        if data["cmd"] == "friends":
-            await show_friends_popup(nickname)
+        msg_text = data['msg']
+        if msg_text.startswith('/add '):
+            target = msg_text[5:].strip()
+            if target and send_friend_request(nickname, target):
+                toast(f"✅ Запрос отправлен {target}")
+            else:
+                toast("❌ Не удалось отправить запрос")
             continue
 
         msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
