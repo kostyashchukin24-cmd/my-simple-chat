@@ -95,7 +95,7 @@ def save_message(user, text):
     cur.close()
     conn.close()
 
-# Инициализация БД
+# Инициализация БД при запуске
 init_db()
 
 async def refresh_msgs(my_name, msg_box):
@@ -137,8 +137,8 @@ async def main():
         if action == "Зарегистрироваться":
             try:
                 reg_data = await input_group("Регистрация", [
-                    input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
-                    input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True),
+                    input("Email", name="email", type="email", required=True),
+                    input("Пароль", name="password", type="password", required=True),
                     input("Ваше имя в чате", name="display_name", required=True, placeholder="Например, Анна")
                 ])
                 if register_user(reg_data['email'], reg_data['password'], reg_data['display_name']):
@@ -152,8 +152,8 @@ async def main():
         elif action == "Войти":
             try:
                 login_data = await input_group("Вход", [
-                    input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
-                    input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True)
+                    input("Email", name="email", type="email", required=True),
+                    input("Пароль", name="password", type="password", required=True)
                 ])
                 user = authenticate_user(login_data['email'], login_data['password'])
                 if user:
@@ -171,17 +171,20 @@ async def main():
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
+    # Загрузка истории
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
+    # Приветствие
     save_message('📢', f'`{display_name}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{display_name}` присоединился к чату'))
 
     refresh_task = run_async(refresh_msgs(display_name, msg_box))
 
+    # Основной цикл чата
     while True:
         data = await input_group("Сообщение", [
             input(name="msg", placeholder="Текст..."),
@@ -194,6 +197,7 @@ async def main():
         msg_box.append(put_markdown(f"`{display_name}`: {data['msg']}"))
         save_message(display_name, data['msg'])
 
+    # Выход
     refresh_task.close()
     online_users.discard(display_name)
     save_message('📢', f'`{display_name}` покинул чат!')
