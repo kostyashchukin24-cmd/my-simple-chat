@@ -59,6 +59,7 @@ def save_message(user, text):
     cur.close()
     conn.close()
 
+# --- ДРУЗЬЯ ---
 def send_friend_request(from_user, to_user):
     if from_user == to_user:
         return False
@@ -134,6 +135,7 @@ async def main():
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
+    # ЗАГРУЖАЕМ ИСТОРИЮ ИЗ БАЗЫ
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
@@ -144,16 +146,17 @@ async def main():
                            validate=lambda n: "Имя занято!" if n in online_users or n == '📢' else None)
     online_users.add(nickname)
 
+    # СОХРАНЯЕМ В БАЗУ!
     save_message('📢', f'`{nickname}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
 
-    # Показ входящих запросов
+    # ПОКАЗ ВХОДЯЩИХ ЗАПРОСОВ ПРИ ВХОДЕ
     pending = get_pending_requests(nickname)
     for user in pending:
         msg_box.append(put_markdown(f'📬 Запрос в друзья от `{user}`'))
         put_buttons([
-            {'label': '✅ Принять', 'value': 'ok', 'color': 'success'},
-            {'label': '❌ Отклонить', 'value': 'no', 'color': 'danger'}
+            {'label': '✅ Принять', 'color': 'success'},
+            {'label': '❌ Отклонить', 'color': 'danger'}
         ], onclick=[
             lambda u=user: accept_friend_request(u, nickname),
             lambda: toast("Запрос отклонён")
@@ -161,35 +164,69 @@ async def main():
 
     refresh_task = run_async(refresh_msgs(nickname, msg_box))
 
-    try:
-        while True:
-            data = await input_group("Сообщение", [
-                input(name="msg", placeholder="Текст... (/add имя — добавить в друзья)"),
-                actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
-            ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
+    while True:
+        data = await input_group("Сообщение", [
+            input(name="msg", placeholder="Текст... (/add имя — добавить в друзья)"),
+            actions(name="cmd", buttons=[
+                "Отправить",
+                {"label": "👥 Друзья", "value": "friends", "type": "submit"},
+                {"label": "Выйти", "type": "cancel"}
+            ])
+        ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
 
-            if data is None:
-                break
+        if data is None:
+            break
 
-            msg_text = data['msg']
-            if msg_text.startswith('/add '):
-                target = msg_text[5:].strip()
+        if data["cmd"] == "friends":
+            # МЕНЮ ДРУЗЕЙ
+            pending_now = get_pending_requests(nickname)
+            content = [put_markdown("## 👥 Друзья")]
+            if pending_now:
+                content.append(put_markdown("### 📬 Входящие запросы:"))
+                for user in pending_now:
+                    content.append(put_row([
+                        put_text(user),
+                        put_buttons([
+                            {'label': '✅', 'color': 'success'},
+                            {'label': '❌', 'color': 'danger'}
+                        ], onclick=[
+                            lambda u=user: accept_friend_request(u, nickname),
+                            lambda: toast("Отклонено")
+                        ])
+                    ]))
+            else:
+                content.append(put_text("Нет входящих запросов."))
+
+            content.append(put_text("Добавить в друзья:"))
+            try:
+                target = await input("Имя пользователя", required=False)
                 if target and target != nickname and target != '📢':
                     if send_friend_request(nickname, target):
-                        toast(f"Запрос отправлен {target}")
+                        toast(f"✅ Запрос отправлен {target}")
                     else:
-                        toast("Не удалось отправить запрос")
-                continue
+                        toast("❌ Не удалось отправить запрос")
+            except Exception:
+                pass  # пользователь закрыл окно
+            continue
 
-            msg_box.append(put_markdown(f"`{nickname}`: {msg_text}"))
-            save_message(nickname, msg_text)
+        msg_text = data['msg']
+        if msg_text.startswith('/add '):
+            target = msg_text[5:].strip()
+            if target and target != nickname and target != '📢':
+                if send_friend_request(nickname, target):
+                    toast(f"✅ Запрос отправлен {target}")
+                else:
+                    toast("❌ Не удалось отправить запрос")
+            continue
 
-    finally:
-        refresh_task.close()
-        online_users.discard(nickname)
-        save_message('📢', f'`{nickname}` покинул чат!')
-        toast("Вы вышли из чата!")
-        put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
+        msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
+        save_message(nickname, data['msg'])  # ← ОБЯЗАТЕЛЬНО в БД
+
+    refresh_task.close()
+    online_users.discard(nickname)
+    save_message('📢', f'`{nickname}` покинул чат!')
+    toast("Вы вышли из чата!")
+    put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
