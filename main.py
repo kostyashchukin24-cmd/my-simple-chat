@@ -1,17 +1,12 @@
 import asyncio
 import os
-import random
-import smtplib
+import bcrypt
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from pywebio import start_server
 from pywebio.input import *
 from pywebio.output import *
 from pywebio.session import run_async, run_js
-from email.mime.text import MIMEText
-from datetime import datetime, timedelta
-
-online_users = set()
 
 def get_db():
     return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
@@ -29,10 +24,8 @@ def init_db():
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            email TEXT PRIMARY KEY,
-            verified BOOLEAN DEFAULT FALSE,
-            verify_code TEXT,
-            code_expires TIMESTAMPTZ
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -61,130 +54,96 @@ def save_message(user, text):
     cur.close()
     conn.close()
 
-def generate_and_save_code(email):
-    code = str(random.randint(100000, 999999))
-    expires = datetime.utcnow() + timedelta(minutes=10)
+def register_user(username, password):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO users (email, verify_code, code_expires)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (email) DO UPDATE
-        SET verify_code = %s, code_expires = %s, verified = FALSE
-    """, (email, code, expires, code, expires))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return code
-
-def verify_code(email, code):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT verify_code, code_expires FROM users
-        WHERE email = %s AND verified = FALSE
-    """, (email,))
-    row = cur.fetchone()
-    if not row:
+    try:
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        cur.execute("INSERT INTO users (username, password_hash) VALUES (%s, %s)", (username, hashed))
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False
+    finally:
         cur.close()
         conn.close()
-        return False
-    stored_code, expires = row
-    # Убираем timezone для сравнения
-    now = datetime.utcnow()
-    expires_naive = expires.replace(tzinfo=None) if expires.tzinfo else expires
-    valid = stored_code == code and now < expires_naive
-    if valid:
-        cur.execute("UPDATE users SET verified = TRUE WHERE email = %s", (email,))
-        conn.commit()
+
+def authenticate_user(username, password):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
+    row = cur.fetchone()
     cur.close()
     conn.close()
-    return valid
-
-def send_verification_code(email, code):
-    msg = MIMEText(f"Ваш код подтверждения для чата: {code}\nДействителен 10 минут.")
-    msg["Subject"] = "Код подтверждения чата"
-    msg["From"] = os.environ["SMTP_USER"]
-    msg["To"] = email
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-        server.send_message(msg)
+    if row:
+        stored_hash = row["password_hash"]
+        return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+    return False
 
 # Инициализация БД
 init_db()
 
 async def main():
-    global online_users
-
     put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    # Загружаем историю
+    # Загрузка истории
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
-    # Шаг 1: ввод email
-    while True:
-        email = await input("Ваш email (только Gmail)", required=True, placeholder="user@gmail.com")
-        if not email.endswith("@gmail.com"):
-            toast("Разрешены только адреса Gmail (@gmail.com)!", color="error")
-            continue
-        break
+    # Выбор: регистрация или вход
+    auth_choice = await radio("Выберите действие", options=['Войти', 'Зарегистрироваться'], required=True)
 
-    # Шаг 2: генерация и отправка кода
-    try:
-        code = generate_and_save_code(email)
-        send_verification_code(email, code)
-        toast(f"Код отправлен на {email}", color="success")
-    except Exception as e:
-        toast(f"Ошибка отправки письма: {str(e)}", color="error")
-        return
+    nickname = None
+    if auth_choice == 'Зарегистрироваться':
+        while True:
+            reg_data = await input_group("Регистрация", [
+                input(name='username', placeholder="Имя пользователя", required=True),
+                input(name='password', type=PASSWORD, placeholder="Пароль", required=True)
+            ])
+            if register_user(reg_data['username'], reg_data['password']):
+                nickname = reg_data['username']
+                break
+            else:
+                toast("Имя уже занято! Попробуйте другое.", color='error')
+    else:  # Войти
+        while True:
+            login_data = await input_group("Вход", [
+                input(name='username', placeholder="Имя пользователя", required=True),
+                input(name='password', type=PASSWORD, placeholder="Пароль", required=True)
+            ])
+            if authenticate_user(login_data['username'], login_data['password']):
+                nickname = login_data['username']
+                break
+            else:
+                toast("Неверное имя или пароль!", color='error')
 
-    # Шаг 3: ввод кода (максимум 3 попытки)
-    verified = False
-    for attempt in range(3):
-        user_code = await input("Введите 6-значный код из письма", required=True, placeholder="123456")
-        if verify_code(email, user_code):
-            verified = True
-            break
-        else:
-            toast("Неверный или просроченный код!", color="error")
-
-    if not verified:
-        toast("Превышено количество попыток. Попробуйте позже.", color="warn")
-        return
-
-    # Используем часть до @ как имя (или можно дать выбрать)
-    nickname = email.split("@")[0]
-    if nickname in online_users or nickname == '📢':
-        nickname = email  # fallback на полный email
-
-    online_users.add(nickname)
+    # Приветствие в чате
     save_message('📢', f'`{nickname}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
 
     refresh_task = run_async(refresh_msgs(nickname, msg_box))
 
-    while True:
-        data = await input_group("Сообщение", [
-            input(name="msg", placeholder="Текст..."),
-            actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
-        ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
-        if data is None:
-            break
-        msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
-        save_message(nickname, data['msg'])
-
-    refresh_task.close()
-    online_users.discard(nickname)
-    save_message('📢', f'`{nickname}` покинул чат!')
-    toast("Вы вышли из чата!")
-    put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
+    try:
+        while True:
+            data = await input_group("Сообщение", [
+                input(name="msg", placeholder="Текст..."),
+                actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
+            ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
+            if data is None:
+                break
+            msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
+            save_message(nickname, data['msg'])
+    finally:
+        refresh_task.close()
+        save_message('📢', f'`{nickname}` покинул чат!')
+        toast("Вы вышли из чата!")
+        put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
 
 async def refresh_msgs(my_name, msg_box):
     conn = get_db()
