@@ -59,7 +59,7 @@ def clear_chat():
 init_db()
 
 async def main():
-    put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
+    put_markdown("## Добро пожаловать!")
 
     # Кнопка очистки чата — видна всем
     put_button("🗑️ Очистить чат", onclick=lambda: (clear_chat(), run_js('location.reload()')), color='danger')
@@ -127,3 +127,4 @@ async def refresh_msgs(my_name, msg_box):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+
