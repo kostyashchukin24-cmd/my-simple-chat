@@ -17,6 +17,8 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+    
+    # Таблица сообщений (уже есть)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
@@ -25,6 +27,18 @@ def init_db():
             created_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    
+    # 🔥 НОВАЯ ТАБЛИЦА: пользователи
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -128,3 +142,4 @@ async def refresh_msgs(my_name, msg_box):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+
