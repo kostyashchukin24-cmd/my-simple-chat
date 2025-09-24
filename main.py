@@ -18,12 +18,13 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+    
+    # Создаём таблицы, если не существуют
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
             text TEXT NOT NULL,
-            recipient TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
@@ -35,6 +36,10 @@ def init_db():
             display_name TEXT NOT NULL
         )
     """)
+    
+    # 🔥 Добавляем recipient, если его ещё нет
+    cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient TEXT;")
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -49,7 +54,6 @@ def get_all_users():
     return names
 
 def get_private_partners(my_name):
-    """Возвращает список пользователей, с которыми есть ЛС (за 24ч)"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -140,7 +144,7 @@ def save_message(sender, text, recipient=None):
     cur.close()
     conn.close()
 
-def clear_chat():
+def clear_public_chat():
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM messages WHERE recipient IS NULL")
@@ -152,7 +156,6 @@ init_db()
 
 # --- Общий чат ---
 async def show_public_chat(display_name, msg_box):
-    # Загружаем историю
     for user, text in load_public_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
@@ -162,7 +165,6 @@ async def show_public_chat(display_name, msg_box):
     save_message('📢', f'`{display_name}` присоединился к общему чату!')
     msg_box.append(put_markdown(f'📢 `{display_name}` присоединился к общему чату!'))
 
-    # Обновление
     async def refresh():
         conn = get_db()
         cur = conn.cursor()
@@ -195,29 +197,28 @@ async def show_public_chat(display_name, msg_box):
 # --- Личные чаты ---
 async def show_private_chats(display_name):
     while True:
-        clear()  # Очищаем весь экран
+        clear()
         put_markdown("## 💬 Личные сообщения")
         
         partners = get_private_partners(display_name)
         all_users = [u for u in get_all_users() if u != display_name]
         
-        options = []
         if partners:
             put_text("Ваши диалоги:")
-            for p in partners:
-                options.append({"label": f"💬 {p}", "value": p})
-            put_buttons(options, onclick=lambda p: asyncio.create_task(open_private_chat(display_name, p)))
+            buttons = [{"label": f"💬 {p}", "value": p} for p in partners]
+            put_buttons(buttons, onclick=lambda p: asyncio.create_task(open_private_chat(display_name, p)))
             put_text("")
         
         if all_users:
             put_buttons([{"label": "➕ Новый чат", "value": "new", "color": "primary"}],
                         onclick=lambda _: asyncio.create_task(start_new_private_chat(display_name, all_users)))
+        else:
+            put_text("Нет других пользователей для чата.")
         
         put_buttons([{"label": "⬅️ Назад к общему чату", "value": "back"}],
                     onclick=lambda _: asyncio.create_task(main_chat_interface(display_name)))
         
-        # Ждём, пока пользователь что-то нажмёт (на самом деле уходим в open_private_chat)
-        await asyncio.sleep(3600)  # просто удерживаем экран
+        await asyncio.sleep(3600)
 
 async def start_new_private_chat(display_name, all_users):
     target = await select("Выберите получателя", options=all_users)
@@ -230,14 +231,12 @@ async def open_private_chat(display_name, partner):
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    # Загружаем историю
     for msg in load_private_messages(display_name, partner):
         if msg["username"] == display_name:
             msg_box.append(put_markdown(f"**Вы**: {msg['text']}"))
         else:
             msg_box.append(put_markdown(f"`{msg['username']}`: {msg['text']}"))
 
-    # Обновление (упрощённое — без фоновой задачи, чтобы не усложнять)
     while True:
         data = await input_group(f"Сообщение для {partner}", [
             input(name="msg", placeholder="Текст..."),
@@ -277,7 +276,7 @@ async def main_chat_interface(display_name):
             break
 
         if data["cmd"] == "clear":
-            clear_chat()
+            clear_public_chat()
             msg_box.clear()
             toast("✅ Общий чат очищен!")
             save_message('📢', 'Общий чат был очищен.')
@@ -295,7 +294,7 @@ async def main_chat_interface(display_name):
     toast("Вы вышли из чата!")
     put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
 
-# --- Основная функция входа ---
+# --- Вход / регистрация ---
 async def main():
     global online_users
 
