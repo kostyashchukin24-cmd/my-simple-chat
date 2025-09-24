@@ -61,7 +61,7 @@ def save_message(user, text):
 
 def send_friend_request(from_user, to_user):
     if from_user == to_user:
-        return False, "Нельзя добавить себя!"
+        return False
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -71,10 +71,10 @@ def send_friend_request(from_user, to_user):
             ON CONFLICT (from_user, to_user) DO NOTHING
         """, (from_user, to_user))
         conn.commit()
-        return True, f"Запрос отправлен {to_user}!"
-    except Exception as e:
+        return True
+    except Exception:
         conn.rollback()
-        return False, f"Ошибка: {str(e)}"
+        return False
     finally:
         cur.close()
         conn.close()
@@ -91,11 +91,16 @@ def get_pending_requests(username):
 def accept_friend_request(from_user, to_user):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("UPDATE friend_requests SET status = 'accepted' WHERE from_user = %s AND to_user = %s", (from_user, to_user))
+    cur.execute("""
+        UPDATE friend_requests
+        SET status = 'accepted'
+        WHERE from_user = %s AND to_user = %s AND status = 'pending'
+    """, (from_user, to_user))
     conn.commit()
     cur.close()
     conn.close()
 
+# Инициализация БД
 init_db()
 
 async def refresh_msgs(my_name, msg_box):
@@ -147,8 +152,8 @@ async def main():
     for user in pending:
         msg_box.append(put_markdown(f'📬 Запрос в друзья от `{user}`'))
         put_buttons([
-            {'label': f'✅ Принять', 'value': 'ok', 'color': 'success'},
-            {'label': f'❌ Отклонить', 'value': 'no', 'color': 'danger'}
+            {'label': '✅ Принять', 'value': 'ok', 'color': 'success'},
+            {'label': '❌ Отклонить', 'value': 'no', 'color': 'danger'}
         ], onclick=[
             lambda u=user: accept_friend_request(u, nickname),
             lambda: toast("Запрос отклонён")
@@ -169,9 +174,11 @@ async def main():
             msg_text = data['msg']
             if msg_text.startswith('/add '):
                 target = msg_text[5:].strip()
-                if target:
-                    ok, msg = send_friend_request(nickname, target)
-                    toast(msg)
+                if target and target != nickname and target != '📢':
+                    if send_friend_request(nickname, target):
+                        toast(f"Запрос отправлен {target}")
+                    else:
+                        toast("Не удалось отправить запрос")
                 continue
 
             msg_box.append(put_markdown(f"`{nickname}`: {msg_text}"))
