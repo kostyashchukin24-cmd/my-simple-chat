@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from pywebio import start_server
-from pywebio.input import input, input_group, actions, PASSWORD
+from pywebio.input import input, input_group, actions, PASSWORD, select
 from pywebio.output import put_markdown, put_scrollable, put_error, put_buttons, toast, output
 from pywebio.session import run_async, run_js
 
@@ -23,6 +23,7 @@ def init_db():
             id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
             text TEXT NOT NULL,
+            recipient TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
@@ -37,6 +38,15 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
+
+def get_all_users():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT display_name FROM users ORDER BY display_name")
+    names = [row[0] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return names
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -72,30 +82,37 @@ def authenticate_user(email: str, password: str):
         return dict(user)
     return None
 
-def load_messages():
+def load_messages_for_user(my_name):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
-        SELECT username, text FROM messages
+        SELECT username, text, recipient FROM messages
         WHERE created_at >= NOW() - INTERVAL '24 hours'
+          AND (
+            recipient IS NULL
+            OR username = %s
+            OR recipient = %s
+          )
         ORDER BY created_at ASC
-        LIMIT 100
-    """)
+        LIMIT 200
+    """, (my_name, my_name))
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [(r["username"], r["text"]) for r in rows]
+    return rows
 
-def save_message(user, text):
+def save_message(sender, text, recipient=None):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("INSERT INTO messages (username, text) VALUES (%s, %s)", (user, text))
+    cur.execute(
+        "INSERT INTO messages (username, text, recipient) VALUES (%s, %s, %s)",
+        (sender, text, recipient)
+    )
     conn.commit()
     cur.close()
     conn.close()
 
 def clear_chat():
-    """Удаляет ВСЕ сообщения из таблицы messages"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM messages")
@@ -105,32 +122,34 @@ def clear_chat():
 
 init_db()
 
-async def refresh_msgs(my_name, msg_box):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT MAX(created_at) FROM messages")
-    last_time = cur.fetchone()[0] or '2020-01-01'
-    cur.close()
-    conn.close()
-
+async def refresh_msgs(my_name, msg_box, last_time):
     while True:
         await asyncio.sleep(1)
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
-            SELECT username, text, created_at FROM messages
+            SELECT username, text, recipient, created_at FROM messages
             WHERE created_at > %s
+              AND (
+                recipient IS NULL
+                OR username = %s
+                OR recipient = %s
+              )
             ORDER BY created_at ASC
-        """, (last_time,))
+        """, (last_time, my_name, my_name))
         new = cur.fetchall()
         cur.close()
         conn.close()
 
         for msg in new:
-            if msg["username"] != my_name:
+            if msg["recipient"] is None:
                 txt = f'📢 {msg["text"]}' if msg["username"] == '📢' else f"`{msg['username']}`: {msg['text']}"
-                msg_box.append(put_markdown(txt))
-                last_time = msg["created_at"]
+            elif msg["recipient"] == my_name:
+                txt = f"📩 **ЛС от `{msg['username']}`**: {msg['text']}"
+            else:
+                txt = f"📤 **ЛС → `{msg['recipient']}`**: {msg['text']}"
+            msg_box.append(put_markdown(txt))
+            last_time = msg["created_at"]
 
 async def confirm_and_clear(msg_box):
     confirmed = await actions("⚠️ Очистка чата", [
@@ -148,7 +167,7 @@ async def confirm_and_clear(msg_box):
 async def main():
     global online_users
 
-    put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
+    put_markdown("## 💬 Чат с личными сообщениями")
 
     current_user = None
     while current_user is None:
@@ -191,23 +210,35 @@ async def main():
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    for user, text in load_messages():
-        if user == '📢':
-            msg_box.append(put_markdown(f'📢 {text}'))
+    # Загружаем историю (публичные + личные)
+    for msg in load_messages_for_user(display_name):
+        if msg["recipient"] is None:
+            txt = f'📢 {msg["text"]}' if msg["username"] == '📢' else f"`{msg['username']}`: {msg['text']}"
+        elif msg["recipient"] == display_name:
+            txt = f"📩 **ЛС от `{msg['username']}`**: {msg['text']}"
         else:
-            msg_box.append(put_markdown(f"`{user}`: {text}"))
+            txt = f"📤 **ЛС → `{msg['recipient']}`**: {msg['text']}"
+        msg_box.append(put_markdown(txt))
 
     save_message('📢', f'`{display_name}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{display_name}` присоединился к чату'))
 
-    refresh_task = run_async(refresh_msgs(display_name, msg_box))
+    # Получаем last_time для обновления
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(created_at) FROM messages")
+    last_time = cur.fetchone()[0] or '2020-01-01'
+    cur.close()
+    conn.close()
+
+    refresh_task = run_async(refresh_msgs(display_name, msg_box, last_time))
 
     while True:
-        # Добавляем кнопку "Очистить чат" СЛЕВА под полем ввода
         data = await input_group("Сообщение", [
             input(name="msg", placeholder="Текст..."),
             actions(name="cmd", buttons=[
                 "Отправить",
+                {"label": "Личное сообщение", "value": "private"},
                 {"label": "Очистить чат", "value": "clear", "color": "danger"},
                 {"label": "Выйти", "type": "cancel"}
             ])
@@ -220,6 +251,19 @@ async def main():
             await confirm_and_clear(msg_box)
             continue
 
+        if data["cmd"] == "private":
+            all_users = get_all_users()
+            others = [u for u in all_users if u != display_name]
+            if not others:
+                toast("Нет других пользователей для отправки ЛС.", color='warn')
+                continue
+            target = await select("Кому отправить ЛС?", options=others)
+            if target:
+                save_message(display_name, data['msg'], recipient=target)
+                msg_box.append(put_markdown(f"📤 **ЛС → `{target}`**: {data['msg']}"))
+            continue
+
+        # Публичное сообщение
         msg_box.append(put_markdown(f"`{display_name}`: {data['msg']}"))
         save_message(display_name, data['msg'])
 
