@@ -23,16 +23,15 @@ def init_db():
             created_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS friend_requests (
-            id SERIAL PRIMARY KEY,
-            from_user TEXT NOT NULL,
-            to_user TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE (from_user, to_user)
-        )
-    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def cleanup_old_messages():
+    """Удаляет сообщения старше 24 часов из базы данных."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM messages WHERE created_at < NOW() - INTERVAL '24 hours'")
     conn.commit()
     cur.close()
     conn.close()
@@ -59,58 +58,58 @@ def save_message(user, text):
     cur.close()
     conn.close()
 
-# --- ДРУЗЬЯ ---
-def send_friend_request(from_user, to_user):
-    if from_user == to_user or to_user == '📢':
-        return False
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            INSERT INTO friend_requests (from_user, to_user)
-            VALUES (%s, %s)
-            ON CONFLICT (from_user, to_user) DO NOTHING
-        """, (from_user, to_user))
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        return False
-    finally:
-        cur.close()
-        conn.close()
-
-def get_pending_requests(to_user):
-    conn = get_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT from_user FROM friend_requests WHERE to_user = %s AND status = 'pending'", (to_user,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [r["from_user"] for r in rows]
-
-def accept_friend_request(from_user, to_user):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE friend_requests
-        SET status = 'accepted'
-        WHERE from_user = %s AND to_user = %s AND status = 'pending'
-    """, (from_user, to_user))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-# Инициализация БД — ОБЯЗАТЕЛЬНО ПОСЛЕ ОБЪЯВЛЕНИЯ ФУНКЦИЙ
+# Инициализация БД и очистка старых сообщений
 init_db()
+cleanup_old_messages()
+
+async def main():
+    global online_users
+    put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
+    msg_box = output()
+    put_scrollable(msg_box, height=300, keep_bottom=True)
+
+    # ЗАГРУЖАЕМ ИСТОРИЮ ИЗ БАЗЫ
+    for user, text in load_messages():
+        if user == '📢':
+            msg_box.append(put_markdown(f'📢 {text}'))
+        else:
+            msg_box.append(put_markdown(f"`{user}`: {text}"))
+
+    nickname = await input("Ваше имя", required=True, placeholder="Имя",
+                           validate=lambda n: "Имя занято!" if n in online_users or n == '📢' else None)
+    online_users.add(nickname)
+
+    # СООБЩЕНИЕ О ВХОДЕ
+    save_message('📢', f'`{nickname}` присоединился к чату!')
+    msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
+
+    refresh_task = run_async(refresh_msgs(nickname, msg_box))
+
+    while True:
+        data = await input_group("Сообщение", [
+            input(name="msg", placeholder="Текст..."),
+            actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
+        ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
+        if data is None:
+            break
+        msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
+        save_message(nickname, data['msg'])
+
+    refresh_task.close()
+    online_users.discard(nickname)
+    save_message('📢', f'`{nickname}` покинул чат!')
+    toast("Вы вышли из чата!")
+    put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
 
 async def refresh_msgs(my_name, msg_box):
+    # Получаем время последнего сообщения при старте
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT MAX(created_at) FROM messages")
     last_time = cur.fetchone()[0] or '2020-01-01'
     cur.close()
     conn.close()
+
     while True:
         await asyncio.sleep(1)
         conn = get_db()
@@ -123,71 +122,13 @@ async def refresh_msgs(my_name, msg_box):
         new = cur.fetchall()
         cur.close()
         conn.close()
+
         for msg in new:
             if msg["username"] != my_name:
                 txt = f'📢 {msg["text"]}' if msg["username"] == '📢' else f"`{msg['username']}`: {msg['text']}"
                 msg_box.append(put_markdown(txt))
-                last_time = msg["created_at"]
-
-async def main():
-    global online_users
-    put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
-    msg_box = output()
-    put_scrollable(msg_box, height=300, keep_bottom=True)
-
-    for user, text in load_messages():
-        if user == '📢':
-            msg_box.append(put_markdown(f'📢 {text}'))
-        else:
-            msg_box.append(put_markdown(f"`{user}`: {text}"))
-
-    nickname = await input("Ваше имя", required=True, placeholder="Имя",
-                           validate=lambda n: "Имя занято!" if n in online_users or n == '📢' else None)
-    online_users.add(nickname)
-
-    save_message('📢', f'`{nickname}` присоединился к чату!')
-    msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
-
-    # 🔔 ПОКАЗ ВХОДЯЩИХ ЗАПРОСОВ ПРИ ВХОДЕ
-    pending = get_pending_requests(nickname)
-    for user in pending:
-        msg_box.append(put_markdown(f'📬 Запрос в друзья от `{user}`'))
-        put_buttons([
-            {'label': '✅ Принять', 'color': 'success'},
-            {'label': '❌ Отклонить', 'color': 'danger'}
-        ], onclick=[
-            lambda u=user: accept_friend_request(u, nickname),
-            lambda: toast("Запрос отклонён")
-        ])
-
-    refresh_task = run_async(refresh_msgs(nickname, msg_box))
-
-    while True:
-        data = await input_group("Сообщение", [
-            input(name="msg", placeholder="Текст... (/add имя — добавить в друзья)"),
-            actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
-        ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
-
-        if data is None:
-            break
-
-        msg_text = data['msg']
-        if msg_text.startswith('/add '):
-            target = msg_text[5:].strip()
-            if target and send_friend_request(nickname, target):
-                toast(f"✅ Запрос отправлен {target}")
-            else:
-                toast("❌ Не удалось отправить запрос")
-            continue
-
-        msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
-        save_message(nickname, data['msg'])
-
-    refresh_task.close()
-    online_users.discard(nickname)
-    save_message('📢', f'`{nickname}` покинул чат!')
-    toast("Вы вышли из чата!")
-    put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
+            # Обновляем last_time даже для собственных сообщений (на случай рассинхрона)
+            last_time = msg["created_at"]
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
