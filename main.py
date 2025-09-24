@@ -94,6 +94,15 @@ def save_message(user, text):
     cur.close()
     conn.close()
 
+def clear_chat():
+    """Удаляет ВСЕ сообщения из таблицы messages"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM messages")
+    conn.commit()
+    cur.close()
+    conn.close()
+
 init_db()
 
 async def refresh_msgs(my_name, msg_box):
@@ -123,6 +132,19 @@ async def refresh_msgs(my_name, msg_box):
                 msg_box.append(put_markdown(txt))
                 last_time = msg["created_at"]
 
+async def confirm_and_clear(msg_box):
+    confirmed = await actions("⚠️ Очистка чата", [
+        "Да, очистить всё",
+        "Отмена"
+    ], help_text="Это удалит ВСЕ сообщения из чата для всех пользователей!")
+    
+    if confirmed == "Да, очистить всё":
+        clear_chat()
+        msg_box.clear()
+        toast("✅ Чат очищен!", color='success')
+        save_message('📢', 'Чат был полностью очищен.')
+        msg_box.append(put_markdown('📢 Чат был полностью очищен.'))
+
 async def main():
     global online_users
 
@@ -146,7 +168,6 @@ async def main():
                     toast("❌ Email уже используется!", color='error')
             except Exception as e:
                 put_error(f"Ошибка регистрации: {str(e)}")
-                print("LOG: Ошибка регистрации:", e)
 
         elif action == "Войти":
             try:
@@ -163,12 +184,11 @@ async def main():
                     toast("❌ Неверный email или пароль!", color='error')
             except Exception as e:
                 put_error(f"Ошибка входа: {str(e)}")
-                print("LOG: Ошибка входа:", e)
 
     display_name = current_user['display_name']
     online_users.add(display_name)
 
-    msg_box = output()  # ✅ Теперь output() определён!
+    msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
     for user, text in load_messages():
@@ -183,13 +203,22 @@ async def main():
     refresh_task = run_async(refresh_msgs(display_name, msg_box))
 
     while True:
+        # Добавляем кнопку "Очистить чат" СЛЕВА под полем ввода
         data = await input_group("Сообщение", [
             input(name="msg", placeholder="Текст..."),
-            actions(name="cmd", buttons=["Отправить", {"label": "Выйти", "type": "cancel"}])
+            actions(name="cmd", buttons=[
+                "Отправить",
+                {"label": "Очистить чат", "value": "clear", "color": "danger"},
+                {"label": "Выйти", "type": "cancel"}
+            ])
         ], validate=lambda d: ("msg", "Введите текст!") if d["cmd"] == "Отправить" and not d["msg"] else None)
 
         if data is None:
             break
+
+        if data["cmd"] == "clear":
+            await confirm_and_clear(msg_box)
+            continue
 
         msg_box.append(put_markdown(f"`{display_name}`: {data['msg']}"))
         save_message(display_name, data['msg'])
