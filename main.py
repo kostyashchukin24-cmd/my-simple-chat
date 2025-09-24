@@ -1,6 +1,8 @@
 import asyncio
 import os
 
+import bcrypt
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -11,6 +13,40 @@ from pywebio.session import run_async, run_js
 
 online_users = set()
 
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def register_user(email: str, password: str, display_name: str):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO users (email, password_hash, display_name) VALUES (%s, %s, %s)",
+            (email, hash_password(password), display_name)
+        )
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:  # email уже существует
+        conn.rollback()
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def authenticate_user(email: str, password: str):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT id, email, password_hash, display_name FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    if user and verify_password(password, user['password_hash']):
+        return dict(user)
+    return None
+    
 def get_db():
     return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
 
@@ -73,25 +109,59 @@ async def main():
 
     put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
 
+    # Экран входа/регистрации
+    while True:
+        action = await actions("Выберите действие", buttons=["Войти", "Зарегистрироваться"])
+        
+        if action == "Зарегистрироваться":
+            reg_data = await input_group("Регистрация", [
+                input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
+                input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True),
+                input("Имя для отображения", name="display_name", required=True)
+            ], validate=lambda d: ("email", "Email уже используется!") if not register_user(d['email'], d['password'], d['display_name']) else None)
+            toast("Регистрация успешна! Войдите.")
+            continue
+
+        elif action == "Войти":
+            login_data = await input_group("Вход", [
+                input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
+                input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True)
+            ])
+            user = authenticate_user(login_data['email'], login_data['password'])
+            if user:
+                current_user = user
+                break
+            else:
+                toast("Неверный email или пароль!", color='error')
+                continue
+
+    # Теперь у нас есть current_user = {id, email, display_name}
+    display_name = current_user['display_name']
+    user_id = current_user['id']
+
+    # Проверка онлайн-пользователей по display_name (или лучше по user_id?)
+    if display_name in online_users:
+        # Можно разрешить одинаковые имена, но лучше использовать ID
+        # Или добавить суффикс: "Иван (2)"
+        pass
+
+    online_users.add(display_name)
+
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    # ЗАГРУЖАЕМ ИСТОРИЮ ИЗ БАЗЫ
+    # Загрузка истории
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
-    nickname = await input("Ваше имя", required=True, placeholder="Имя",
-                           validate=lambda n: "Имя занято!" if n in online_users or n == '📢' else None)
-    online_users.add(nickname)
+    # Приветствие
+    save_message('📢', f'`{display_name}` присоединился к чату!')
+    msg_box.append(put_markdown(f'📢 `{display_name}` присоединился к чату'))
 
-    # СОХРАНЯЕМ В БАЗУ!
-    save_message('📢', f'`{nickname}` присоединился к чату!')
-    msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
-
-    refresh_task = run_async(refresh_msgs(nickname, msg_box))
+    refresh_task = run_async(refresh_msgs(display_name, msg_box))
 
     while True:
         data = await input_group("Сообщение", [
@@ -102,14 +172,16 @@ async def main():
         if data is None:
             break
 
-        msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
-        save_message(nickname, data['msg'])  # ← ОБЯЗАТЕЛЬНО в БД
+        msg_box.append(put_markdown(f"`{display_name}`: {data['msg']}"))
+        save_message(display_name, data['msg'])
 
+    # Выход
     refresh_task.close()
-    online_users.discard(nickname)
-    save_message('📢', f'`{nickname}` покинул чат!')
+    online_users.discard(display_name)
+    save_message('📢', f'`{display_name}` покинул чат!')
     toast("Вы вышли из чата!")
     put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
+    
 
 async def refresh_msgs(my_name, msg_box):
     # Получаем время последнего сообщения при старте
@@ -142,4 +214,5 @@ async def refresh_msgs(my_name, msg_box):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+
 
