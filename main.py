@@ -181,49 +181,53 @@ async def refresh_msgs(my_name, msg_box):
                 msg_box.append(put_markdown(txt))
                 last_time = msg["created_at"]
 
-# --- Меню друзей ---
-async def show_friends_menu(nickname):
+# --- Меню друзей (в popup) ---
+async def show_friends_popup(nickname):
     while True:
-        clear()
-        put_markdown("## 👥 Друзья")
-        
         friends = get_friends(nickname)
         pending = get_pending_requests(nickname)
 
+        content = []
+
         if friends:
-            put_markdown("### ✅ Ваши друзья:")
-            put_table([[f] for f in friends], header=["Имя"])
+            content.append(put_markdown("### ✅ Друзья"))
+            content.append(put_table([[f] for f in friends], header=["Имя"]))
         else:
-            put_text("Список друзей пуст.")
+            content.append(put_text("Список друзей пуст."))
 
         if pending:
-            put_markdown("### 📬 Входящие запросы:")
+            content.append(put_markdown("### 📬 Входящие запросы"))
             for user in pending:
-                put_row([
-                    put_text(user),
+                def make_accept(u):
+                    return lambda: accept_friend_request(u, nickname)
+                def make_reject(u):
+                    return lambda: reject_friend_request(u, nickname)
+                content.append(put_row([
+                    put_text(u),
                     put_buttons([
-                        {'label': '✅ Принять', 'value': 'accept', 'color': 'success'},
-                        {'label': '❌ Отклонить', 'value': 'reject', 'color': 'danger'}
-                    ], onclick=[
-                        lambda u=user: accept_friend_request(u, nickname),
-                        lambda u=user: reject_friend_request(u, nickname)
-                    ])
-                ])
+                        {'label': '✅', 'value': 'ok', 'color': 'success'},
+                        {'label': '❌', 'value': 'no', 'color': 'danger'}
+                    ], onclick=[make_accept(user), make_reject(user)])
+                ]))
         else:
-            put_text("Нет новых запросов.")
+            content.append(put_text("Нет новых запросов."))
 
-        put_text("")
-        target = await input("Добавить в друзья (имя)", placeholder="Имя", required=False)
-        if target:
-            if target == nickname:
-                toast("Нельзя добавить себя!")
-            elif send_friend_request(nickname, target):
-                toast(f"Запрос отправлен {target}!")
-            else:
-                toast("Не удалось отправить запрос.")
+        content.append(put_text(""))
+        content.append(put_text("Добавить в друзья:"))
 
-        # Кнопка "Назад"
-        await actions("", buttons=['⬅️ Назад в чат'])
+        try:
+            target = await input("Имя пользователя", placeholder="Имя", required=False)
+            if target:
+                if target == nickname:
+                    toast("Нельзя добавить себя!")
+                elif send_friend_request(nickname, target):
+                    toast(f"Запрос отправлен {target}!")
+                else:
+                    toast("Не удалось отправить запрос.")
+        except Exception:
+            pass  # пользователь закрыл окно
+
+        # Закрываем popup — больше не нужно циклить
         break
 
 # --- Аутентификация ---
@@ -253,11 +257,16 @@ async def auth():
                 toast("❌ Неверное имя или пароль!")
 
 # --- Основной чат ---
-async def chat_main(nickname):
+async def main():
     global online_users
+    init_db()
+
+    nickname = await auth()
+
     if nickname in online_users:
-        put_error("Вы уже в чате!")
+        put_error("Вы уже в чате в другой вкладке!")
         await asyncio.sleep(2)
+        run_js('location.reload()')
         return
 
     online_users.add(nickname)
@@ -266,21 +275,28 @@ async def chat_main(nickname):
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
+    # Загрузка истории
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
+    # Уведомление о входе
     save_message('📢', f'`{nickname}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
+
+    # Показ входящих запросов при входе
+    pending = get_pending_requests(nickname)
+    for req in pending:
+        msg_box.append(put_markdown(f'📬 Запрос в друзья от `{req}`'))
 
     refresh_task = run_async(refresh_msgs(nickname, msg_box))
 
     try:
         while True:
             data = await input_group("Сообщение", [
-                input(name="msg", placeholder="Текст..."),
+                input(name="msg", placeholder="Текст... (/add имя — добавить в друзья)"),
                 actions(name="cmd", buttons=[
                     "Отправить",
                     {"label": "👥 Друзья", "value": "friends", "type": "submit"},
@@ -290,15 +306,24 @@ async def chat_main(nickname):
 
             if data is None:
                 break
-            elif data["cmd"] == "friends":
-                await show_friends_menu(nickname)
-                # После возврата — перерисуем чат
-                clear()
-                await chat_main(nickname)  # рекурсивный возврат (простой способ)
-                return
-            else:
-                msg_box.append(put_markdown(f"`{nickname}`: {data['msg']}"))
-                save_message(nickname, data['msg'])
+
+            if data["cmd"] == "friends":
+                await show_friends_popup(nickname)
+                continue
+
+            msg_text = data['msg']
+
+            # Поддержка /add в основном чате (опционально)
+            if msg_text.startswith('/add '):
+                target = msg_text[5:].strip()
+                if target and target != nickname:
+                    if send_friend_request(nickname, target):
+                        toast(f"Запрос отправлен {target}")
+                continue
+
+            # Обычное сообщение
+            msg_box.append(put_markdown(f"`{nickname}`: {msg_text}"))
+            save_message(nickname, msg_text)
 
     finally:
         refresh_task.close()
@@ -306,13 +331,6 @@ async def chat_main(nickname):
         save_message('📢', f'`{nickname}` покинул чат!')
         toast("Вы вышли из чата!")
         put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
-
-# --- Запуск ---
-async def main():
-    init_db()
-    nickname = await auth()
-    clear()
-    await chat_main(nickname)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
