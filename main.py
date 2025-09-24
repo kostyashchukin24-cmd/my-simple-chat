@@ -7,8 +7,6 @@ from pywebio.input import *
 from pywebio.output import *
 from pywebio.session import run_async, run_js
 
-online_users = set()
-
 def get_db():
     return psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
 
@@ -61,7 +59,6 @@ def clear_chat():
 init_db()
 
 async def main():
-    global online_users
     put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
 
     # Кнопка очистки чата — видна всем
@@ -77,9 +74,9 @@ async def main():
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
+    # Ввод имени без проверки на "занято" (только запрет '📢')
     nickname = await input("Ваше имя", required=True, placeholder="Имя",
-                           validate=lambda n: "Имя занято!" if n in online_users or n == '📢' else None)
-    online_users.add(nickname)
+                           validate=lambda n: "Имя недопустимо!" if n == '📢' else None)
 
     save_message('📢', f'`{nickname}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{nickname}` присоединился к чату'))
@@ -97,7 +94,6 @@ async def main():
         save_message(nickname, data['msg'])
 
     refresh_task.close()
-    online_users.discard(nickname)
     save_message('📢', f'`{nickname}` покинул чат!')
     toast("Вы вышли из чата!")
     put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
