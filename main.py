@@ -126,5 +126,5 @@ async def refresh_msgs(my_name, msg_box):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+    start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False, theme='dark')
 
