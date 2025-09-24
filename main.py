@@ -154,7 +154,7 @@ async def main():
     while current_user is None:
         action = await actions("Добро пожаловать!", buttons=["Войти", "Зарегистрироваться"])
 
-        if action == "Зарегистрироваться":
+               if action == "Зарегистрироваться":
             try:
                 reg_data = await input_group("Регистрация", [
                     input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
@@ -162,12 +162,15 @@ async def main():
                     input("Ваше имя в чате", name="display_name", required=True, placeholder="Например, Анна")
                 ])
                 
-                if register_user(reg_data['email'], reg_data['password'], reg_data['display_name']):
+                success = register_user(reg_data['email'], reg_data['password'], reg_data['display_name'])
+                if success:
                     toast("✅ Регистрация успешна! Теперь войдите.")
                 else:
                     toast("❌ Email уже используется!", color='error')
             except Exception as e:
-                toast("Ошибка регистрации", color='error')
+                # ВАЖНО: покажи ошибку!
+                put_error(f"Ошибка регистрации: {str(e)}")
+                print("Ошибка:", e)  # Это будет в логах Render
 
         elif action == "Войти":
             try:
@@ -182,8 +185,9 @@ async def main():
                     toast(f"Привет, {user['display_name']}!")
                 else:
                     toast("❌ Неверный email или пароль!", color='error')
-            except Exception as e:
-                toast("Ошибка входа", color='error')
+             except Exception as e:
+                put_error(f"Ошибка входа: {str(e)}")
+                print("Ошибка входа:", e)
 
     # --- Пользователь вошёл! Теперь чат ---
     display_name = current_user['display_name']
@@ -260,6 +264,7 @@ async def refresh_msgs(my_name, msg_box):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+
 
 
 
