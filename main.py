@@ -104,65 +104,111 @@ def save_message(user, text):
 # Инициализация БД
 init_db()
 
+def hash_password(password: str) -> str:
+    """Превращает пароль в зашифрованную строку (хэш)"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Проверяет, совпадает ли пароль с хэшем"""
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def register_user(email: str, password: str, display_name: str) -> bool:
+    """Регистрирует нового пользователя. Возвращает True, если успешно."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO users (email, password_hash, display_name) VALUES (%s, %s, %s)",
+            (email, hash_password(password), display_name)
+        )
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:
+        # Email уже существует (из-за UNIQUE)
+        conn.rollback()
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def authenticate_user(email: str, password: str):
+    """Проверяет email и пароль. Возвращает данные пользователя или None."""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT id, email, password_hash, display_name FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if user and verify_password(password, user['password_hash']):
+        return dict(user)  # Возвращаем словарь с данными
+    return None
+    
 async def main():
     global online_users
 
     put_markdown("## 💬 Чат (сообщения хранятся 24 часа)")
 
-    # Экран входа/регистрации
-    while True:
-        action = await actions("Выберите действие", buttons=["Войти", "Зарегистрироваться"])
-        
+    # --- Экран входа или регистрации ---
+    current_user = None
+    while current_user is None:
+        action = await actions("Добро пожаловать!", buttons=["Войти", "Зарегистрироваться"])
+
         if action == "Зарегистрироваться":
-            reg_data = await input_group("Регистрация", [
-                input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
-                input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True),
-                input("Имя для отображения", name="display_name", required=True)
-            ], validate=lambda d: ("email", "Email уже используется!") if not register_user(d['email'], d['password'], d['display_name']) else None)
-            toast("Регистрация успешна! Войдите.")
-            continue
+            try:
+                reg_data = await input_group("Регистрация", [
+                    input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
+                    input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True),
+                    input("Ваше имя в чате", name="display_name", required=True, placeholder="Например, Анна")
+                ])
+                
+                if register_user(reg_data['email'], reg_data['password'], reg_data['display_name']):
+                    toast("✅ Регистрация успешна! Теперь войдите.")
+                else:
+                    toast("❌ Email уже используется!", color='error')
+            except Exception as e:
+                toast("Ошибка регистрации", color='error')
 
         elif action == "Войти":
-            login_data = await input_group("Вход", [
-                input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
-                input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True)
-            ])
-            user = authenticate_user(login_data['email'], login_data['password'])
-            if user:
-                current_user = user
-                break
-            else:
-                toast("Неверный email или пароль!", color='error')
-                continue
+            try:
+                login_data = await input_group("Вход", [
+                    input("Email", name="email", type=INPUT_TYPE.EMAIL, required=True),
+                    input("Пароль", name="password", type=INPUT_TYPE.PASSWORD, required=True)
+                ])
+                
+                user = authenticate_user(login_data['email'], login_data['password'])
+                if user:
+                    current_user = user
+                    toast(f"Привет, {user['display_name']}!")
+                else:
+                    toast("❌ Неверный email или пароль!", color='error')
+            except Exception as e:
+                toast("Ошибка входа", color='error')
 
-    # Теперь у нас есть current_user = {id, email, display_name}
+    # --- Пользователь вошёл! Теперь чат ---
     display_name = current_user['display_name']
-    user_id = current_user['id']
-
-    # Проверка онлайн-пользователей по display_name (или лучше по user_id?)
     if display_name in online_users:
-        # Можно разрешить одинаковые имена, но лучше использовать ID
-        # Или добавить суффикс: "Иван (2)"
+        # Можно добавить суффикс, но пока просто пропустим
         pass
-
     online_users.add(display_name)
 
     msg_box = output()
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
-    # Загрузка истории
+    # Загружаем историю сообщений
     for user, text in load_messages():
         if user == '📢':
             msg_box.append(put_markdown(f'📢 {text}'))
         else:
             msg_box.append(put_markdown(f"`{user}`: {text}"))
 
-    # Приветствие
+    # Приветствие в чате
     save_message('📢', f'`{display_name}` присоединился к чату!')
     msg_box.append(put_markdown(f'📢 `{display_name}` присоединился к чату'))
 
     refresh_task = run_async(refresh_msgs(display_name, msg_box))
 
+    # Основной цикл чата
     while True:
         data = await input_group("Сообщение", [
             input(name="msg", placeholder="Текст..."),
@@ -175,12 +221,12 @@ async def main():
         msg_box.append(put_markdown(f"`{display_name}`: {data['msg']}"))
         save_message(display_name, data['msg'])
 
-    # Выход
+    # Выход из чата
     refresh_task.close()
     online_users.discard(display_name)
     save_message('📢', f'`{display_name}` покинул чат!')
     toast("Вы вышли из чата!")
-    put_buttons(['Вернуться'], onclick=lambda _: run_js('location.reload()'))
+    put_buttons(['Вернуться в чат'], onclick=lambda _: run_js('location.reload()'))
     
 
 async def refresh_msgs(my_name, msg_box):
@@ -214,5 +260,6 @@ async def refresh_msgs(my_name, msg_box):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     start_server(main, host='0.0.0.0', port=port, debug=False, cdn=False)
+
 
 
