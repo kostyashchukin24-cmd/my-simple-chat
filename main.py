@@ -101,6 +101,7 @@ def save_message(user, text):
     conn.close()
 
 def clear_chat():
+    """Удаляет ВСЕ сообщения из таблицы messages — НЕ трогает друзей!"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM messages")
@@ -108,7 +109,7 @@ def clear_chat():
     cur.close()
     conn.close()
 
-# === FRIENDS LOGIC ===
+# === FRIENDS FUNCTIONS ===
 
 def add_friend(user_id: int, friend_id: int) -> bool:
     if user_id == friend_id:
@@ -171,10 +172,7 @@ async def manage_friends(current_user):
             if not candidates:
                 toast("Никого не найдено", color='warning')
                 continue
-            choices = [
-                {"label": u['display_name'], "value": u['id']}
-                for u in candidates
-            ]
+            choices = [{"label": u['display_name'], "value": u['id']} for u in candidates]
             choices.append({"label": "Отмена", "value": None})
             friend_id = await actions("Выберите пользователя", choices)
             if friend_id:
@@ -190,7 +188,7 @@ async def manage_friends(current_user):
                 names = "\n".join(f"- `{f['display_name']}`" for f in friends)
                 put_markdown(f"### Ваши друзья:\n{names}")
 
-# === END FRIENDS LOGIC ===
+# === END FRIENDS ===
 
 init_db()
 
