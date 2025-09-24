@@ -7,7 +7,7 @@ from psycopg2.extras import RealDictCursor
 
 from pywebio import start_server
 from pywebio.input import input, input_group, actions, PASSWORD
-from pywebio.output import put_markdown, put_scrollable, put_error, put_buttons, toast
+from pywebio.output import put_markdown, put_scrollable, put_error, put_buttons, toast, output
 from pywebio.session import run_async, run_js
 
 online_users = set()
@@ -94,7 +94,6 @@ def save_message(user, text):
     cur.close()
     conn.close()
 
-# Инициализация БД
 init_db()
 
 async def refresh_msgs(my_name, msg_box):
@@ -169,7 +168,7 @@ async def main():
     display_name = current_user['display_name']
     online_users.add(display_name)
 
-    msg_box = output()
+    msg_box = output()  # ✅ Теперь output() определён!
     put_scrollable(msg_box, height=300, keep_bottom=True)
 
     for user, text in load_messages():
